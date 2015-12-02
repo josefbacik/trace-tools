@@ -86,27 +86,7 @@ static struct pending_blkio pending;
 static struct blkio_hash blkio_hash;
 static pthread_t logger_thread = -1;
 static unsigned exiting = 0;
-/*
-void die(const char *fmt, ...)
-{
-	va_list ap;
-	int ret = errno;
 
-	if (errno)
-		perror("trace-cmd");
-	else
-		ret = -1;
-
-	tracecmd_stop_threads(TRACE_TYPE_STREAM);
-	va_start(ap, fmt);
-	fprintf(stderr, "  ");
-	vfprintf(stderr, fmt, ap);
-	va_end(ap);
-
-	fprintf(stderr, "\n");
-	exit(ret);
-}
-*/
 static inline void *malloc_or_die(size_t size)
 {
 	void *ret = malloc(size);
@@ -117,7 +97,6 @@ static inline void *malloc_or_die(size_t size)
 
 static void add_new_entry(char action, u64 time)
 {
-//	printf("adding new entry %c %llu\n", action, time);
 	if (action == 'R') {
 		if (stats.nr_reads == stats.nr_reads_alloc) {
 			stats.nr_reads_alloc += 1024;
@@ -155,108 +134,6 @@ static int match_blkio(struct trace_hash_item *item, void *data)
 	return blkio->dev == search->dev && blkio->sector == search->sector &&
 		blkio->action == search->action;
 }
-
-#if 0
-static int sort_blkio(struct trace_hash_item *a, struct trace_hash_item *b)
-{
-	struct blkio *A = container_of(a, struct blkio, hash);
-	struct blkio *B = container_of(b, struct blkio, hash);
-
-	if (A->ts < B->ts)
-		return 1;
-	else if (A->ts > B->ts)
-		return -1;
-	return 0;
-}
-
-static void handle_event(struct blklatency_handle *h,
-			 struct pevent_record *record, struct event_data *edata)
-{
-	struct blkio *blkio;
-	unsigned long long sector, dev, nr_sector, key;
-	struct trace_hash_item *item;
-	struct blkio search;
-	char rwbs[9];
-	int ret;
-
-	memcpy(rwbs, record->data + edata->rwbs_field->offset,
-	       sizeof(char) * 8);
-	rwbs[8] = '\0';
-	/*
-	if (rwbs[0] != 'W' && rwbs[0] != 'R')
-		return;
-		*/
-/*
-	ret = pevent_read_number_field(edata->nr_sector_field, record->data,
-					&nr_sector);
-	if (ret)
-		die("Missing important field in event");
-
-	/* We don't care about 0 length requests.
-	if (nr_sector == 0) {
-		printf("%d, 0 length request\n", edata->id);
-		return;
-	}
-*/
-
-	ret = pevent_read_number_field(edata->nr_sector_field, record->data,
-					&nr_sector);
-	ret |= pevent_read_number_field(edata->dev_field, record->data, &dev);
-	ret |= pevent_read_number_field(edata->sector_field, record->data,
-					&sector);
-	if (ret)
-		die("Missing important field in event");
-
-printf("%llu: got a %s request, dev %llu, sector %llu, rwbs %s, nr_sector %llu\n", record->ts, edata == h->blk_issue ? "issue" : "complete", dev, sector, rwbs, nr_sector);
-	if (nr_sector == 0 || (rwbs[0] != 'W' && rwbs[0] != 'R'))
-		return;
-
-	key = trace_hash(dev + sector + rwbs[0]);
-	search.dev = dev;
-	search.sector = sector;
-	search.action = rwbs[0];
-	search.ts = record->ts;
-	if (edata == h->blk_issue)
-		search.complete = 0;
-	else
-		search.complete = 1;
-	/*
-	 * First check and see if we have a duplicate entry, things like the
-	 * super block can get written over and over again, and if it's issue
-	 * or complete are on different CPUs we can have much sadness.
-	 *
-	 * To deal with this we need to keep track of any duplicates and then
-	 * merge it all together at the end in order to ensure we are matching
-	 * the proper events.
-	 */
-	item = trace_hash_find(&h->blk_hash, key, match_blkio, &search);
-	if (item) {
-
-	}
-	if (item) {
-		trace_hash_del(item);
-		blkio = container_of(item, struct blkio, hash);
-		printf("matched with entry at %llu\n", blkio->ts);
-		pthread_mutex_lock(&stats.mutex);
-		add_new_entry(blkio->action,
-			blkio->complete ? blkio->ts - record->ts :
-				record->ts - blkio->ts);
-		pthread_mutex_unlock(&stats.mutex);
-		free(blkio);
-	} else {
-//		printf("not found, adding new entry\n");
-		blkio = malloc_or_die(sizeof(*blkio));
-		memset(blkio, 0, sizeof(*blkio));
-		blkio->dev = search.dev;
-		blkio->sector = search.sector;
-		blkio->action = search.action;
-		blkio->complete = !search.complete;
-		blkio->ts = record->ts;
-		blkio->hash.key = trace_hash(dev + sector + rwbs[0]);
-		trace_hash_add_sort(&h->blk_hash, &blkio->hash, sort_blkio);
-	}
-}
-#endif
 
 static void add_pending_blkio(struct blkio *blkio)
 {
@@ -444,7 +321,6 @@ static void process_pending(void)
 	pthread_mutex_lock(&blkio_hash.mutex);
 	for (i = 0; i < pending.nr_pending; i++) {
 		blkio = pending.pending[i];
-//printf("%llu: got a %s request, dev %llu, sector %llu, rwbs %c\n", blkio->ts, blkio->complete == 0 ? "issue" : "complete", blkio->dev, blkio->sector, blkio->action);
 		if (blkio->complete) {
 			struct trace_hash_item *item;
 			struct blkio *issue;
