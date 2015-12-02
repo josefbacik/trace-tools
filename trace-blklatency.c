@@ -29,7 +29,6 @@
 #include "stats.h"
 #include "trace-event-sorter.h"
 
-typedef unsigned long long u64;
 #define offset_of(type, field)          (long)(&((type *)0)->field)
 #define container_of(p, type, field)    (type *)((long)p - offset_of(type, field))
 
@@ -52,8 +51,8 @@ struct blklatency_handle {
 struct blkio {
 	struct trace_hash_item	hash;
 	struct trace_event	event;
-	u64			dev;
-	u64			sector;
+	unsigned long long	dev;
+	unsigned long long	sector;
 	int			complete;
 	int			missed_count;
 	char			action;
@@ -273,17 +272,6 @@ static void log_stats(void)
 	printf("min %llu, max %llu\n", write_stats.min, write_stats.max);
 }
 
-static void trace_blklatency_global_init(void)
-{
-	memset(&blkio_hash, 0, sizeof(blkio_hash));
-	if (pthread_mutex_init(&blkio_hash.mutex, NULL))
-		die("Failed to init blk_hash mutex");
-	trace_hash_init(&blkio_hash.hash, 1024);
-
-	if (trace_event_sorter_init())
-		die("Couldn't init the sorter");
-}
-
 static void trace_init_blklatency(struct tracecmd_input *handle,
 				  struct hook_list *hook, int global)
 {
@@ -302,15 +290,6 @@ static void trace_init_blklatency(struct tracecmd_input *handle,
 	setup_fields(h);
 }
 
-static void trace_blklatency_done(void)
-{
-	trace_event_process_pending();
-	trace_event_sorter_cleanup();
-
-	pthread_mutex_destroy(&blkio_hash.mutex);
-	/* TODO: free the handles and such. */
-}
-
 static int finished = 0;
 static void finish(int signum)
 {
@@ -321,10 +300,20 @@ int main(int argc, char **argv)
 {
 	struct timespec start;
 
+	/* Init the stats */
 	stats_reset(&write_stats);
 	stats_reset(&read_stats);
 
-	trace_blklatency_global_init();
+	/* Init our hash table */
+	memset(&blkio_hash, 0, sizeof(blkio_hash));
+	if (pthread_mutex_init(&blkio_hash.mutex, NULL))
+		die("Failed to init blk_hash mutex");
+	trace_hash_init(&blkio_hash.hash, 1024);
+
+	/* Start the trace sorter thread. */
+	if (trace_event_sorter_init())
+		die("Couldn't init the sorter");
+
 	/* create instances */
 	tracecmd_create_top_instance("blklatency");
 	/* enable events */
@@ -351,9 +340,15 @@ int main(int argc, char **argv)
 		}
 	}
 	tracecmd_stop_threads(TRACE_TYPE_STREAM);
+
 	/* cleanup */
 	tracecmd_disable_tracing();
 	tracecmd_remove_instances();
-	trace_blklatency_done();
+
+	/* Do all the pending processing stuff */
+	trace_event_process_pending();
+	trace_event_sorter_cleanup();
+
+	pthread_mutex_destroy(&blkio_hash.mutex);
 	return 0;
 }
