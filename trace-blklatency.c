@@ -26,6 +26,8 @@
 
 #include <trace-cmd/trace-cmd.h>
 #include <trace-cmd/trace-hash.h>
+#include "stats.h"
+#include "trace-event-sorter.h"
 
 typedef unsigned long long u64;
 #define offset_of(type, field)          (long)(&((type *)0)->field)
@@ -47,30 +49,15 @@ struct blklatency_handle {
 	struct blklatency_handle	*next;
 };
 
-struct blklatency_stats {
-	u64		*read_times;
-	u64		*write_times;
-	u64		nr_reads, nr_reads_alloc;
-	u64		nr_writes, nr_writes_alloc;
-};
-
 struct blkio {
 	struct trace_hash_item	hash;
+	struct trace_event	event;
 	u64			dev;
 	u64			sector;
-	u64			ts;
 	int			complete;
 	int			missed_count;
 	char			action;
 	struct blkio		*next;
-};
-
-struct pending_blkio {
-	struct blkio	**pending;
-	int		nr_pending;
-	int		nr_alloc;
-	pthread_mutex_t	mutex;
-	pthread_cond_t	cond;
 };
 
 struct blkio_hash {
@@ -78,13 +65,11 @@ struct blkio_hash {
 	pthread_mutex_t		mutex;
 };
 
-static int max_pending_events = 1024;
-static struct blklatency_stats stats;
+static struct stats read_stats;
+static struct stats write_stats;
 static struct blklatency_handle *handles = NULL;
 static struct blklatency_handle *last_handle = NULL;
-static struct pending_blkio pending;
 static struct blkio_hash blkio_hash;
-static pthread_t logger_thread = -1;
 static unsigned exiting = 0;
 
 static inline void *malloc_or_die(size_t size)
@@ -95,58 +80,54 @@ static inline void *malloc_or_die(size_t size)
 	return ret;
 }
 
-static void add_new_entry(char action, u64 time)
-{
-	if (action == 'R') {
-		if (stats.nr_reads == stats.nr_reads_alloc) {
-			stats.nr_reads_alloc += 1024;
-			stats.read_times = realloc(stats.read_times,
-						   stats.nr_reads_alloc *
-						   sizeof(u64));
-			if (!stats.read_times)
-				die("Couldn't realloc read times");
-		}
-		stats.read_times[stats.nr_reads++] = time;
-	} else {
-		if (stats.nr_writes == stats.nr_writes_alloc) {
-			stats.nr_writes_alloc += 1024;
-			stats.write_times = realloc(stats.write_times,
-						    stats.nr_writes_alloc *
-						    sizeof(u64));
-			if (!stats.write_times)
-				die("Couldn't realloc write times");
-		}
-		stats.write_times[stats.nr_writes++] = time;
-	}
-}
-
 static int match_blkio(struct trace_hash_item *item, void *data)
 {
 	struct blkio *blkio = container_of(item, struct blkio, hash);
 	struct blkio *search = (struct blkio *)data;
 
 	/* If we recorded a complete make sure the issue is before the complete. */
-	if (blkio->complete && search->ts >= blkio->ts)
+	if (blkio->complete && search->event.ts >= blkio->event.ts)
 		return 0;
-	if (!blkio->complete && search->ts <= blkio->ts)
+	if (!blkio->complete && search->event.ts <= blkio->event.ts)
 		return 0;
 
 	return blkio->dev == search->dev && blkio->sector == search->sector &&
 		blkio->action == search->action;
 }
 
-static void add_pending_blkio(struct blkio *blkio)
+static int process_blkio(struct trace_event *event)
 {
-	if (pending.nr_pending == pending.nr_alloc) {
-		pending.nr_alloc += 1024;
-		pending.pending = realloc(pending.pending,
-			pending.nr_alloc * sizeof(struct blkio *));
-		if (!pending.pending)
-			die("Couldn't realloc pending");
+	struct blkio *blkio = container_of(event, struct blkio, event);
+
+	if (blkio->complete) {
+		struct trace_hash_item *item;
+		struct blkio *issue;
+
+		item = trace_hash_find(&blkio_hash.hash,
+				       blkio->hash.key, match_blkio,
+				       blkio);
+		if (!item)
+			return 1;
+		issue = container_of(item, struct blkio, hash);
+		trace_hash_del(item);
+		if (issue->action == 'R')
+			stats_add_value(&read_stats, blkio->event.ts - issue->event.ts);
+		else
+			stats_add_value(&write_stats, blkio->event.ts - issue->event.ts);
+		free(issue);
+		free(blkio);
+	} else {
+		pthread_mutex_lock(&blkio_hash.mutex);
+		trace_hash_add(&blkio_hash.hash, &blkio->hash);
+		pthread_mutex_unlock(&blkio_hash.mutex);
 	}
-	pending.pending[pending.nr_pending++] = blkio;
-	if (pending.nr_pending >= max_pending_events)
-		pthread_cond_signal(&pending.cond);
+	return 0;
+}
+
+static void free_blkio(struct trace_event *event)
+{
+	struct blkio *blkio = container_of(event, struct blkio, event);
+	free(blkio);
 }
 
 static void handle_event(struct blklatency_handle *h,
@@ -180,11 +161,11 @@ static void handle_event(struct blklatency_handle *h,
 	blkio->sector = sector;
 	blkio->action = rwbs[0];
 	blkio->complete = edata == h->blk_complete;
-	blkio->ts = record->ts;
 	blkio->hash.key = trace_hash(dev + sector + rwbs[0]);
-	pthread_mutex_lock(&pending.mutex);
-	add_pending_blkio(blkio);
-	pthread_mutex_unlock(&pending.mutex);
+	blkio->event.free = free_blkio;
+	blkio->event.process = process_blkio;
+	blkio->event.ts = record->ts;
+	trace_event_add_pending(&blkio->event);
 }
 
 static void handle_missed_events(struct blklatency_handle *h)
@@ -193,6 +174,9 @@ static void handle_missed_events(struct blklatency_handle *h)
 	struct trace_hash_item *item;
 	struct blkio *blkio;
 	int i;
+
+	trace_event_process_pending();
+	trace_event_drop_pending();
 
 	pthread_mutex_lock(&blkio_hash.mutex);
 	trace_hash_for_each_bucket(bucket, &blkio_hash.hash) {
@@ -203,12 +187,6 @@ static void handle_missed_events(struct blklatency_handle *h)
 		}
 	}
 	pthread_mutex_unlock(&blkio_hash.mutex);
-
-	pthread_mutex_lock(&pending.mutex);
-	for (i = 0; i < pending.nr_pending; i++)
-		free(pending.pending[i]);
-	pending.nr_pending = 0;
-	pthread_mutex_unlock(&pending.mutex);
 }
 
 static void trace_blklatency_record(struct tracecmd_input *handle,
@@ -217,7 +195,7 @@ static void trace_blklatency_record(struct tracecmd_input *handle,
 	struct blklatency_handle *h;
 	struct pevent *pevent;
 	int id;
-//printf("got a record\n");
+
 	if (last_handle && last_handle->handle == handle)
 		h = last_handle;
 	else {
@@ -270,7 +248,6 @@ static void setup_fields(struct blklatency_handle *h)
 	if (!event)
 		die("Can't find block:block_rq_complete");
 	edata->id = event->id;
-	printf("complete id is %d\n", edata->id);
 	edata->dev_field = pevent_find_field(event, "dev");
 	edata->sector_field = pevent_find_field(event, "sector");
 	edata->rwbs_field = pevent_find_field(event, "rwbs");
@@ -281,166 +258,19 @@ static void setup_fields(struct blklatency_handle *h)
 	h->blk_complete = edata;
 }
 
-static int compare_u64(const void *a, const void *b)
+static void log_stats(void)
 {
-	u64 * const *A = a;
-	u64 * const *B = b;
-
-	if (*A > *B)
-		return 1;
-	else if (*A < *B)
-		return -1;
-	return 0;
-}
-
-static int p_index(u64 val, int percent)
-{
-	return (val * percent) / 100;
-}
-
-static int compare_blkio(const void *a, const void *b)
-{
-	struct blkio * const *A = a;
-	struct blkio * const *B = b;
-
-	if ((*A)->ts > (*B)->ts)
-		return 1;
-	else if ((*A)->ts < (*B)->ts)
-		return -1;
-	return 0;
-}
-
-static void process_pending(void)
-{
-	struct blkio *blkio;
-	static struct blkio *last = NULL;
-	int i;
-
-	qsort(pending.pending, pending.nr_pending, sizeof(*pending.pending),
-	      compare_blkio);
-	pthread_mutex_lock(&blkio_hash.mutex);
-	for (i = 0; i < pending.nr_pending; i++) {
-		blkio = pending.pending[i];
-		if (blkio->complete) {
-			struct trace_hash_item *item;
-			struct blkio *issue;
-
-			item = trace_hash_find(&blkio_hash.hash,
-					       blkio->hash.key, match_blkio,
-					       blkio);
-			if (!item) {
-				blkio->missed_count++;
-
-				/* Probably never going to happen */
-				if (blkio->missed_count == 5) {
-					free(blkio);
-					continue;
-				}
-
-				if (i == 0) {
-					if (pending.nr_pending >=
-					    max_pending_events)
-						max_pending_events += 512;
-					break;
-				}
-
-				/*
-				 * We are missing some stuff, we probably
-				 * started processing before we'd read all the
-				 * buffers, so just shift stuff over and wait
-				 * for more entries.
-				 */
-				memmove(pending.pending, pending.pending + i,
-					sizeof(struct blkio *) *
-					(pending.nr_pending - i));
-				if (pending.pending[0] != blkio)
-					printf("WE FUCKED UP\n");
-				last = blkio;
-				break;
-			} else if (last == blkio) {
-				printf("Ok we found it later, hooray!\n");
-			}
-			issue = container_of(item, struct blkio, hash);
-			trace_hash_del(item);
-			add_new_entry(issue->action, blkio->ts - issue->ts);
-			free(issue);
-			free(blkio);
-		} else {
-			trace_hash_add(&blkio_hash.hash, &blkio->hash);
-		}
-	}
-	pthread_mutex_unlock(&blkio_hash.mutex);
-	printf("nr_pending %d, i %d\n", pending.nr_pending, i);
-	fflush(stdout);
-	pending.nr_pending -= i;
-}
-
-static void *log_stats(void *arg)
-{
-	struct timespec ts;
-	u64 *reads, *writes;
-	u64 nr_reads, nr_writes;
-	int ret;
-
-	printf("thread started\n");
-	while (!exiting) {
-		ret = 0;
-
-		pthread_mutex_lock(&pending.mutex);
-		clock_gettime(CLOCK_REALTIME, &ts);
-		ts.tv_sec += 60;
-again:
-		while (pending.nr_pending < max_pending_events &&
-		       ret == 0 && !exiting) {
-			ret = pthread_cond_timedwait(&pending.cond, &pending.mutex,
-						     &ts);
-		}
-		process_pending();
-		if (ret != ETIMEDOUT && !exiting)
-			goto again;
-		if (max_pending_events > 1024)
-			max_pending_events = 1024;
-		pthread_mutex_unlock(&pending.mutex);
-
-		reads = stats.read_times;
-		writes = stats.write_times;
-		nr_reads = stats.nr_reads;
-		nr_writes = stats.nr_writes;
-		stats.nr_reads = 0;
-		stats.nr_writes = 0;
-
-		qsort(reads, nr_reads, sizeof(u64), compare_u64);
-		qsort(writes, nr_writes, sizeof(u64), compare_u64);
-
-		printf("blk read latency p50: %llu\n",
-			(unsigned long long)reads[p_index(nr_reads, 50)]);
-		printf("blk read latency p90: %llu\n",
-			(unsigned long long)reads[p_index(nr_reads, 90)]);
-		printf("blk read latency p99: %llu\n",
-			(unsigned long long)reads[p_index(nr_reads, 99)]);
-		printf("min %llu, max %llu\n", reads[0], reads[nr_reads-1]);
-		printf("blk write latency p50: %llu\n",
-			(unsigned long long)writes[p_index(nr_writes, 50)]);
-		printf("blk write latency p90: %llu\n",
-			(unsigned long long)writes[p_index(nr_writes, 90)]);
-		printf("blk write latency p99: %llu\n",
-			(unsigned long long)writes[p_index(nr_writes, 99)]);
-		printf("min %llu, max %llu\n", writes[0], writes[nr_writes-1]);
-	}
-
-	return NULL;
-}
-
-static void alloc_stats(int nr_elements)
-{
-	if (nr_elements < 1024)
-		nr_elements = 1024;
-	stats.read_times = malloc_or_die(sizeof(u64) * nr_elements);
-	stats.write_times = malloc_or_die(sizeof(u64) * nr_elements);
-	memset(stats.read_times, 0, sizeof(u64) * nr_elements);
-	memset(stats.write_times, 0, sizeof(u64) * nr_elements);
-	stats.nr_reads_alloc = nr_elements;
-	stats.nr_writes_alloc = nr_elements;
+	printf("blk read latency p50: %llu\n", stats_p_value(&read_stats, 50));
+	printf("blk read latency p90: %llu\n", stats_p_value(&read_stats, 90));
+	printf("blk read latency p99: %llu\n", stats_p_value(&read_stats, 99));
+	printf("min %llu, max %llu\n", read_stats.min, read_stats.max);
+	printf("blk write latency p50: %llu\n",
+	       stats_p_value(&write_stats, 50));
+	printf("blk write latency p90: %llu\n",
+	       stats_p_value(&write_stats, 90));
+	printf("blk write latency p99: %llu\n",
+	       stats_p_value(&write_stats, 99));
+	printf("min %llu, max %llu\n", write_stats.min, write_stats.max);
 }
 
 static void trace_blklatency_global_init(void)
@@ -450,18 +280,8 @@ static void trace_blklatency_global_init(void)
 		die("Failed to init blk_hash mutex");
 	trace_hash_init(&blkio_hash.hash, 1024);
 
-	memset(&stats, 0, sizeof(stats));
-	alloc_stats(1024);
-
-	memset(&pending, 0, sizeof(pending));
-	pending.nr_alloc = 1024;
-	pending.pending = malloc_or_die(pending.nr_alloc *
-					sizeof(struct blkio *));
-	if (pthread_mutex_init(&pending.mutex, NULL))
-		die("Failed to init pending mutex");
-
-	if (pthread_create(&logger_thread, NULL, log_stats, NULL))
-		die("Failed to create logger thread");
+	if (trace_event_sorter_init())
+		die("Couldn't init the sorter");
 }
 
 static void trace_init_blklatency(struct tracecmd_input *handle,
@@ -470,7 +290,6 @@ static void trace_init_blklatency(struct tracecmd_input *handle,
 	struct pevent *pevent = tracecmd_get_pevent(handle);
 	struct blklatency_handle *h;
 
-	printf("Getting called so this works\n");
 	tracecmd_set_show_data_func(handle, trace_blklatency_record);
 	h = malloc_or_die(sizeof(*h));
 	memset(h, 0, sizeof(*h));
@@ -485,18 +304,10 @@ static void trace_init_blklatency(struct tracecmd_input *handle,
 
 static void trace_blklatency_done(void)
 {
-	pthread_mutex_lock(&pending.mutex);
-	exiting = 1;
-	pthread_cond_signal(&pending.cond);
-	pthread_mutex_unlock(&pending.mutex);
+	trace_event_process_pending();
+	trace_event_sorter_cleanup();
 
-	pthread_join(logger_thread, NULL);
-	pthread_mutex_destroy(&pending.mutex);
 	pthread_mutex_destroy(&blkio_hash.mutex);
-	free(pending.pending);
-	free(stats.read_times);
-	free(stats.write_times);
-
 	/* TODO: free the handles and such. */
 }
 
@@ -508,6 +319,11 @@ static void finish(int signum)
 
 int main(int argc, char **argv)
 {
+	struct timespec start;
+
+	stats_reset(&write_stats);
+	stats_reset(&read_stats);
+
 	trace_blklatency_global_init();
 	/* create instances */
 	tracecmd_create_top_instance("blklatency");
@@ -522,9 +338,17 @@ int main(int argc, char **argv)
 	tracecmd_enable_tracing();
 	/* wait for exit condition */
 	signal(SIGINT, finish);
+	clock_gettime(CLOCK_REALTIME, &start);
 	while (!finished) {
-		struct timeval tv = { 1 , 0 };
+		struct timeval tv = { 5 , 0 };
+		struct timespec ts;
+
 		tracecmd_stream_loop(&tv);
+		clock_gettime(CLOCK_REALTIME, &ts);
+		if ((ts.tv_sec - start.tv_sec) >= 60) {
+			log_stats();
+			start = ts;
+		}
 	}
 	tracecmd_stop_threads(TRACE_TYPE_STREAM);
 	/* cleanup */

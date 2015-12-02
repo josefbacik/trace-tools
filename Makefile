@@ -5,8 +5,8 @@ LIBS = -ltracecmd -lpthread
 
 all: syscalls blklatency
 
-blklatency: trace-blklatency.c
-	gcc -o trace-blklatency trace-blklatency.c $(LIBS)
+blklatency: $(OBJS) trace-blklatency.c
+	gcc -o trace-blklatency trace-blklatency.c $(OBJS) $(LIBS)
 
 syscalls: $(OBJS) trace-syscalls.c
 	gcc -o trace-syscalls trace-syscalls.c $(OBJS) $(LIBS)
