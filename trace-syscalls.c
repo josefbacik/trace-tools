@@ -18,6 +18,8 @@
 #include <signal.h>
 #include <trace-cmd/trace-cmd.h>
 #include <trace-cmd/trace-hash.h>
+#include <pthread.h>
+#include <unistd.h>
 #include "stats.h"
 #include "trace-event-sorter.h"
 

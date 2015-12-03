@@ -19,8 +19,12 @@
 struct stats {
 	unsigned long long	*values;
 	unsigned long long	nr_values, nr_alloc;
-	unsigned long long	min, max;
 	unsigned		sorted:1;
+};
+
+struct stat_value {
+	unsigned long long	value;
+	int			percent;
 };
 
 int stats_add_value(struct stats *stats, unsigned long long value);
@@ -30,8 +34,6 @@ static inline void stats_reset(struct stats *stats)
 {
 	stats->nr_values = 0;
 	stats->sorted = 0;
-	stats->min = (unsigned long long)-1;
-	stats->max = 0;
 }
 
 static inline unsigned long long stats_p_value(struct stats *stats,
@@ -39,6 +41,8 @@ static inline unsigned long long stats_p_value(struct stats *stats,
 {
 	unsigned long long index = (stats->nr_values * percent) / 100;
 
+	if (index >= stats->nr_values)
+		index = stats->nr_values - 1;
 	if (!stats->sorted)
 		stats_sort(stats);
 	if (!stats->nr_values)
