@@ -15,4 +15,4 @@ syscalls: $(OBJS) trace-syscalls.c
 	gcc -o trace-syscalls trace-syscalls.c $(OBJS) $(LIBS)
 
 clean:
-	rm -f trace-blklatency trace-syscalls blklatency-cli
+	rm -f trace-blklatency trace-syscalls blklatency-cli *.o
