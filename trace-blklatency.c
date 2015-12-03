@@ -454,8 +454,8 @@ int main(int argc, char **argv)
 		daemonize();
 
 	/* Init the stats */
-	stats_reset(&write_stats);
-	stats_reset(&read_stats);
+	stats_init(&write_stats);
+	stats_init(&read_stats);
 
 	printf("init has tables\n");
 	/* Init our hash table */

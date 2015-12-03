@@ -239,8 +239,15 @@ int main(int argc, char **argv)
 	struct syscall_entry *entry = syscalls;
 	int ret;
 
-	stats_reset(&write_stats);
-	stats_reset(&read_stats);
+	stats_init(&write_stats);
+	stats_init(&read_stats);
+
+	/*
+	 * Syscalls are kind of heavy, and we only run for 5 seconds, jack up
+	 * the maximum stats we'll keep around.
+	 */
+	write_stats.max_alloc = (25 * 1024 * 1014) / sizeof(unsigned long long);
+	read_stats.max_alloc = (25 * 1024 * 1014) / sizeof(unsigned long long);
 
 	memset(&syscall_hash, 0, sizeof(syscall_hash));
 	trace_hash_init(&syscall_hash, 32);

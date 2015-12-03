@@ -16,10 +16,13 @@
 #ifndef _STATS_H_
 #define _STATS_H_
 
+#include <stdio.h>
+
 struct stats {
 	unsigned long long	*values;
 	unsigned long long	nr_values, nr_alloc;
 	unsigned		sorted:1;
+	unsigned long long	max_alloc;
 };
 
 struct stat_value {
@@ -34,6 +37,13 @@ static inline void stats_reset(struct stats *stats)
 {
 	stats->nr_values = 0;
 	stats->sorted = 0;
+}
+
+static inline void stats_init(struct stats *stats)
+{
+	stats_reset(stats);
+	/* Default to 10mb worth of stats */
+	stats->max_alloc = (10 * 1024 * 1024) / sizeof(unsigned long long);
 }
 
 static inline unsigned long long stats_p_value(struct stats *stats,
