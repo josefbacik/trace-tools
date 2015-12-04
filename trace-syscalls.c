@@ -22,6 +22,7 @@
 #include <unistd.h>
 #include "stats.h"
 #include "trace-event-sorter.h"
+#include "utils.h"
 
 struct syscall_entry {
 	char			*name;
@@ -237,7 +238,14 @@ static void finish(int signum)
 int main(int argc, char **argv)
 {
 	struct syscall_entry *entry = syscalls;
+	char *entity;
 	int ret;
+
+	entity = get_entity_name();
+	if (!entity) {
+		perror("get_entity_name");
+		return 1;
+	}
 
 	stats_init(&write_stats);
 	stats_init(&read_stats);
@@ -275,8 +283,11 @@ int main(int argc, char **argv)
 		entry++;
 	}
 	tracecmd_expand_event_list();
+
+	/* We don't want to record ourselves. */
 	tracecmd_enable_events();
 	tracecmd_start_threads(TRACE_TYPE_STREAM, trace_init_syscalllatency, 0);
+	tracecmd_filter_pid(getpid(), 1);
 
 	signal(SIGINT, finish);
 	signal(SIGALRM, finish);
@@ -284,7 +295,7 @@ int main(int argc, char **argv)
 
 	alarm(5);
 	while (!finished) {
-		struct timeval tv = { 1, 0 };
+		struct timeval tv = { 5, 0 };
 		tracecmd_stream_loop(&tv);
 	}
 	tracecmd_stop_threads(TRACE_TYPE_STREAM);
@@ -294,13 +305,19 @@ int main(int argc, char **argv)
 	trace_event_process_pending();
 	trace_event_sorter_cleanup();
 
-	printf("read p50 is %llu\n", stats_p_value(&read_stats, 50));
-	printf("read p90 is %llu\n", stats_p_value(&read_stats, 90));
-	printf("read p99 is %llu\n", stats_p_value(&read_stats, 99));
-
-	printf("write p50 is %llu\n", stats_p_value(&write_stats, 50));
-	printf("write p90 is %llu\n", stats_p_value(&write_stats, 90));
-	printf("write p99 is %llu\n", stats_p_value(&write_stats, 99));
-
+	printf("[");
+	print_ods_value(entity, "kernel.syscall.write_latency", 50,
+			stats_p_value(&write_stats, 50), 0);
+	print_ods_value(entity, "kernel.syscall.write_latency", 90,
+			stats_p_value(&write_stats, 90), 0);
+	print_ods_value(entity, "kernel.syscall.write_latency", 99,
+			stats_p_value(&write_stats, 99), 0);
+	print_ods_value(entity, "kernel.syscall.read_latency", 50,
+			stats_p_value(&read_stats, 50), 0);
+	print_ods_value(entity, "kernel.syscall.read_latency", 90,
+			stats_p_value(&read_stats, 90), 0);
+	print_ods_value(entity, "kernel.syscall.read_latency", 99,
+			stats_p_value(&read_stats, 99), 1);
+	printf("]\n");
 	return 0;
 }
