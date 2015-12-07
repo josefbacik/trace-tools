@@ -193,7 +193,6 @@ static void handle_missed_events(struct blklatency_handle *h)
 	struct trace_hash_item **bucket;
 	struct trace_hash_item *item;
 	struct blkio *blkio;
-	int i;
 
 	trace_event_process_pending();
 	trace_event_drop_pending();
@@ -295,7 +294,8 @@ static void setup_fields(struct blklatency_handle *h)
 static void *stats_fn(void *unused)
 {
 	struct sockaddr_un local, remote;
-	int fd, confd, len;
+	int fd, confd;
+	socklen_t len;
 
 	if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
 		perror("socket");
@@ -457,7 +457,6 @@ int main(int argc, char **argv)
 	stats_init(&write_stats);
 	stats_init(&read_stats);
 
-	printf("init has tables\n");
 	/* Init our hash table */
 	memset(&blkio_hash, 0, sizeof(blkio_hash));
 	if (pthread_mutex_init(&blkio_hash.mutex, NULL) ||
@@ -467,14 +466,12 @@ int main(int argc, char **argv)
 	}
 	trace_hash_init(&blkio_hash.hash, 1024);
 
-	printf("starting sorter\n");
 	/* Start the trace sorter thread. */
 	if (trace_event_sorter_init()) {
 		die("Couldn't init the sorter");
 		exit(1);
 	}
 
-	printf("starting stats thread\n");
 	if (pthread_create(&stats_thread, NULL, stats_fn, NULL)) {
 		perror("creating stats thread");
 		trace_event_sorter_cleanup();
@@ -494,7 +491,6 @@ int main(int argc, char **argv)
 	tracecmd_enable_tracing();
 	/* wait for exit condition */
 	signal(SIGINT, finish);
-	printf("looping\n");
 	while (!finished) {
 		struct timeval tv = { 5 , 0 };
 

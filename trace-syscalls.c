@@ -239,7 +239,6 @@ int main(int argc, char **argv)
 {
 	struct syscall_entry *entry = syscalls;
 	char *entity;
-	int ret;
 
 	entity = get_entity_name();
 	if (!entity) {
@@ -279,7 +278,7 @@ int main(int argc, char **argv)
 		char buf[1024];
 
 		snprintf(buf, 1024, "syscalls:sys_%s", entry->name);
-		ret = tracecmd_add_event(strdup(buf), 0);
+		tracecmd_add_event(strdup(buf), 0);
 		entry++;
 	}
 	tracecmd_expand_event_list();

@@ -29,8 +29,6 @@ static char *entity;
 static int get_value(int percent, unsigned long long *value)
 {
 	int ret = write(fd, &percent, sizeof(percent));
-	int size = sizeof(unsigned long long);
-	unsigned long long *ptr;
 
 	if (ret < sizeof(percent)) {
 		perror("write");
@@ -67,7 +65,6 @@ static int print_percentile(int percent, int last)
 
 int main(int argc, char **argv)
 {
-	unsigned long long value[2];
 	struct sockaddr_un remote;
 	int ret = 0, reset = -1;
 	size_t len;

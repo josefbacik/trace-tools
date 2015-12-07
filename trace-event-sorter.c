@@ -28,8 +28,6 @@ struct pending_events {
 };
 typedef int (process_t)(void *);
 
-static process_t *process;
-
 struct pending_events pending;
 static int finished = 0;
 static pthread_t sort_thread;
